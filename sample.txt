@@ -1,0 +1,11 @@
+FastAPI is a Python framework used to build APIs. It is built on Starlette for web functionality and Pydantic for data validation. FastAPI supports asynchronous programming and automatically generates OpenAPI documentation.
+
+FastAPI applications are commonly structured with routes, request models, response models, services, and database layers. Routes define HTTP endpoints such as GET, POST, PUT, and DELETE.
+
+PostgreSQL is a relational database commonly used in backend applications. It supports transactions, indexes, foreign keys, and complex SQL queries.
+
+Redis is an in-memory data store often used for caching, session storage, rate limiting, and temporary data.
+
+Docker packages applications and their dependencies into containers. Containers provide consistent environments between development, testing, and production.
+
+Kubernetes is used to orchestrate containerized applications. It can manage deployments, scaling, service discovery, and container health.
