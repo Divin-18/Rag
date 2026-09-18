@@ -170,24 +170,33 @@ class QueryRequest(BaseModel):
 # Rewriting Query
 # ============================================================
 
-def rewrite_query(question: str) -> str:
+def generate_queries(question: str) -> list[str]:
     prompt = f"""
-Rewrite the user's question into a concise search query
-for retrieving relevant information from a knowledge base.
+Generate 3 different search queries for the user's question.
 
-Keep the important technical terms.
-Do not answer the question.
-Return only the rewritten search query.
+The queries should:
+- preserve the original meaning
+- use important technical or domain terms
+- use different wording
+- be suitable for semantic search
+- return only the 3 queries, one per line
+- do not number them
 
 User question:
 {question}
 
-Search query:
+Queries:
 """
 
     response = llm.invoke(prompt)
 
-    return response.content.strip()
+    queries = [
+        line.strip()
+        for line in response.content.splitlines()
+        if line.strip()
+    ]
+
+    return queries[:3]
 
 # ============================================================
 # NEW RERANKED RAG ENDPOINT
@@ -199,30 +208,31 @@ async def query(req: QueryRequest):
     # --------------------------------------------------------
     # STEP 1: Retrieve candidates from Chroma
     # --------------------------------------------------------
-    search_query = rewrite_query(req.question)
+    queries = generate_queries(req.question)
 
     print(f"Original query: {req.question}")
-    print(f"Rewritten query: {search_query}")
+    print("Generated queries:")
 
-    if req.category:
+    for query in queries:
+        print(f"- {query}")
 
-        documents = db.similarity_search(
-            search_query,
-            k=5,
-            filter={
-                "category": req.category
-            }
-        )
+    all_documents = []
 
-    else:
+    for query in queries:
 
-        documents = db.similarity_search(
-            search_query,
-            k=5
-        )
+        if req.category:
+            documents = db.similarity_search(
+                query,
+                k=5,
+                filter={"category": req.category}
+            )
+        else:
+            documents = db.similarity_search(
+                query,
+                k=5
+            )
 
-
-    print("Retrieved documents:", len(documents))
+    all_documents.extend(documents)
 
 
     # --------------------------------------------------------
