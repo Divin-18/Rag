@@ -1,5 +1,6 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 # RAG / Vector database
 from langchain_chroma import Chroma
@@ -15,6 +16,7 @@ import re
 
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
+from fastapi.middleware.cors import CORSMiddleware
 
 # OLD: No longer needed because we manually handle retrieval + reranking
 # from langchain_core.prompts import PromptTemplate
@@ -22,6 +24,18 @@ from rank_bm25 import BM25Okapi
 
 
 app = FastAPI(title="Simple RAG API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+conversation_store: dict[str, list[dict[str, str]]] = {}
 
 
 # ============================================================
@@ -42,12 +56,15 @@ db = Chroma(
     embedding_function=embeddings
 )
 
+
 # Load all documents from Chroma for keyword search
 collection = db.get(
     include=["documents", "metadatas"]
 )
 
+
 corpus_documents = []
+
 
 for content, metadata in zip(
     collection["documents"],
@@ -70,7 +87,9 @@ tokenized_corpus = [
     for doc in corpus_documents
 ]
 
+
 bm25 = BM25Okapi(tokenized_corpus)
+
 
 # ============================================================
 # 3. RERANKER
@@ -103,11 +122,11 @@ llm = ChatOllama(
 # and do NOT add commentary.
 # If the answer is not in the context, say
 # "I don't know based on the provided information."
-#
+
 # Context: {context}
-#
+
 # Question: {question}
-#
+
 # Answer:"""
 
 # PROMPT = PromptTemplate(
@@ -129,7 +148,7 @@ llm = ChatOllama(
 # Top documents
 #       ↓
 # LLM
-#
+
 # qa_chain = RetrievalQA.from_chain_type(
 #     llm=llm,
 #     retriever=db.as_retriever(
@@ -144,9 +163,21 @@ llm = ChatOllama(
 # REQUEST MODEL
 # ============================================================
 
+# class QueryRequest(BaseModel):
+#     question: str
+#     category: str | None = None
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class QueryRequest(BaseModel):
+    session_id: str
     question: str
     category: str | None = None
+    # history: list[ChatMessage] = Field(default_factory=list)
 
 
 # ============================================================
@@ -160,13 +191,13 @@ class QueryRequest(BaseModel):
 # Top 2
 #   ↓
 # LLM
-#
+
 # @app.post("/query")
 # async def query(req: QueryRequest):
 #     result = qa_chain.invoke({
 #         "query": req.question
 #     })
-#
+
 #     return {
 #         "answer": result["result"],
 #         "sources": [
@@ -182,12 +213,12 @@ class QueryRequest(BaseModel):
 
 # @app.post("/search")
 # async def search(req: QueryRequest):
-#
+
 #     results = db.similarity_search_with_score(
 #         req.question,
 #         k=5
 #     )
-#
+
 #     return {
 #         "question": req.question,
 #         "results": [
@@ -204,21 +235,72 @@ class QueryRequest(BaseModel):
 # Rewriting Query
 # ============================================================
 
-def generate_queries(question: str) -> list[str]:
+# def generate_queries(question: str) -> list[str]:
+#     prompt = f"""
+# Generate exactly 3 alternative search queries for the user's question.
+
+# Rules:
+# - All 3 queries must have exactly the same meaning and intent as the original.
+# - Rephrase the question using different wording.
+# - Keep all important technical and domain terms.
+# - Do not introduce a different answer or related concept.
+# - Do not introduce new entities, technologies, products, databases, people, or assumptions.
+# - Do not answer the question.
+# - Return exactly 3 queries, one per line.
+# - Do not number them.
+
+# User question:
+# {question}
+
+# Queries:
+# """
+
+#     response = llm.invoke(prompt)
+
+#     queries = [
+#         line.strip()
+#         for line in response.content.splitlines()
+#         if line.strip()
+#     ]
+
+#     return queries[:3]
+
+
+# def generate_queries(
+#     question: str,
+#     history: list[ChatMessage]
+# ) -> list[str]:
+
+def generate_queries(
+    question: str,
+    history: list[dict[str, str]]
+) -> list[str]:
+
+    conversation = "\n".join(
+        f"{message['role']}: {message['content']}"
+        for message in history[-6:]
+    )
+
     prompt = f"""
 Generate exactly 3 alternative search queries for the user's question.
 
 Rules:
-- All 3 queries must have exactly the same meaning and intent as the original.
-- Rephrase the question using different wording.
-- Keep all important technical and domain terms.
+- Preserve exactly the same intent as the user's question.
+- Use the conversation history to resolve references such as:
+  "it", "this", "that", "they", "the framework", etc.
+- Rephrase using different wording.
+- Keep important technical and domain terms.
 - Do not introduce a different answer or related concept.
-- Do not introduce new entities, technologies, products, databases, people, or assumptions.
+- Do not introduce new entities, technologies, products, databases,
+  people, or assumptions.
 - Do not answer the question.
 - Return exactly 3 queries, one per line.
 - Do not number them.
 
-User question:
+Conversation history:
+{conversation}
+
+Current user question:
 {question}
 
 Queries:
@@ -234,9 +316,10 @@ Queries:
 
     return queries[:3]
 
+
 # ============================================================
 # NEW RERANKED RAG ENDPOINT
-# ============================================================   
+# ============================================================
 
 def keyword_search(
     query: str,
@@ -281,11 +364,30 @@ def keyword_search(
 @app.post("/query")
 async def query(req: QueryRequest):
 
+    history = conversation_store.get(
+        req.session_id,
+        []
+    )
+
+    # Ambiguous reference without conversation history
+    if not history and re.search(
+        r"\b(it|this|that|they|them|these|those)\b",
+        req.question.lower()
+    ):
+        return {
+            "answer": "I need more context to understand what you are referring to.",
+            "best_score": 0.0,
+            "sources": []
+        }
+
     # --------------------------------------------------------
     # STEP 1: Generate multiple search queries
     # --------------------------------------------------------
 
-    queries = generate_queries(req.question)
+    queries = generate_queries(
+        req.question,
+        history
+    )
 
     print(f"Original query: {req.question}")
 
@@ -300,7 +402,9 @@ async def query(req: QueryRequest):
     all_documents = []
 
     for query in queries:
+
         print(f"\nSearch query: {query}")
+
         # Vector search
         if req.category:
             vector_documents = db.similarity_search(
@@ -313,12 +417,15 @@ async def query(req: QueryRequest):
                 query,
                 k=5
             )
+
         print("Vector results:")
+
         for doc in vector_documents:
             print(
                 f"  - {doc.metadata.get('document_id')} | "
                 f"chunk {doc.metadata.get('chunk_id')}"
             )
+
         all_documents.extend(vector_documents)
 
         # Keyword search
@@ -375,8 +482,14 @@ async def query(req: QueryRequest):
     # STEP 3: Create question-document pairs
     # --------------------------------------------------------
 
+    # pairs = [
+    #     (req.question, doc.page_content)
+    #     for doc in documents
+    # ]
+    rerank_query = queries[0] if queries else req.question
+
     pairs = [
-        (req.question, doc.page_content)
+        (rerank_query, doc.page_content)
         for doc in documents
     ]
 
@@ -433,6 +546,7 @@ async def query(req: QueryRequest):
     # --------------------------------------------------------
     # STEP 7: Keep only the best 2 documents
     # --------------------------------------------------------
+
     score_margin = 4.0
 
     top_documents = [
@@ -456,22 +570,54 @@ async def query(req: QueryRequest):
     # STEP 9: Create the LLM prompt
     # --------------------------------------------------------
 
+    # prompt = f"""
+    # You are a question-answering assistant.
+
+    # Use the provided context to answer the question.
+
+    # Rules:
+    # - Answer using information from the context.
+    # - Do not use outside knowledge.
+    # - If the context does not contain the answer, say:
+    #   "I don't know based on the provided information."
+    # - Keep the answer concise.
+
+    # Context:
+    # {context}
+
+    # Question:
+    # {req.question}
+
+    # Answer:
+    # """
+
+
+    conversation = "\n".join(
+        f"{message['role']}: {message['content']}"
+        for message in history[-6:]
+    )
+
+
     prompt = f"""
 You are a question-answering assistant.
 
-Use the provided context to answer the question.
+Use the provided context to answer the current question.
 
 Rules:
 - Answer using information from the context.
 - Do not use outside knowledge.
+- Use conversation history only to understand what the user is referring to.
 - If the context does not contain the answer, say:
   "I don't know based on the provided information."
 - Keep the answer concise.
 
+Conversation history:
+{conversation}
+
 Context:
 {context}
 
-Question:
+Current question:
 {req.question}
 
 Answer:
@@ -488,6 +634,25 @@ Answer:
     # --------------------------------------------------------
     # STEP 11: Return answer + sources
     # --------------------------------------------------------
+
+    conversation_store.setdefault(
+    req.session_id,
+    []
+    )
+
+    conversation_store[req.session_id].append(
+        {
+            "role": "user",
+            "content": req.question
+        }
+    )
+
+    conversation_store[req.session_id].append(
+        {
+            "role": "assistant",
+            "content": response.content
+        }
+    )
 
     return {
         "answer": response.content,
