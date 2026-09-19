@@ -433,10 +433,12 @@ async def query(req: QueryRequest):
     # --------------------------------------------------------
     # STEP 7: Keep only the best 2 documents
     # --------------------------------------------------------
+    score_margin = 4.0
 
     top_documents = [
         doc
         for doc, score in ranked[:2]
+        if score >= best_score - score_margin
     ]
 
 
