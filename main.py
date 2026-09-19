@@ -11,6 +11,11 @@ from langchain_ollama import ChatOllama
 # Reranker
 from sentence_transformers import CrossEncoder
 
+import re
+
+from langchain_core.documents import Document
+from rank_bm25 import BM25Okapi
+
 # OLD: No longer needed because we manually handle retrieval + reranking
 # from langchain_core.prompts import PromptTemplate
 # from langchain_classic.chains import RetrievalQA
@@ -37,6 +42,35 @@ db = Chroma(
     embedding_function=embeddings
 )
 
+# Load all documents from Chroma for keyword search
+collection = db.get(
+    include=["documents", "metadatas"]
+)
+
+corpus_documents = []
+
+for content, metadata in zip(
+    collection["documents"],
+    collection["metadatas"]
+):
+    corpus_documents.append(
+        Document(
+            page_content=content,
+            metadata=metadata or {}
+        )
+    )
+
+
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+tokenized_corpus = [
+    tokenize(doc.page_content)
+    for doc in corpus_documents
+]
+
+bm25 = BM25Okapi(tokenized_corpus)
 
 # ============================================================
 # 3. RERANKER
@@ -202,37 +236,111 @@ Queries:
 # NEW RERANKED RAG ENDPOINT
 # ============================================================   
 
+def keyword_search(
+    query: str,
+    k: int = 5,
+    category: str | None = None
+) -> list[Document]:
+
+    query_tokens = tokenize(query)
+
+    scores = bm25.get_scores(query_tokens)
+
+    ranked_indices = sorted(
+        range(len(scores)),
+        key=lambda i: scores[i],
+        reverse=True
+    )
+
+    results = []
+
+    for index in ranked_indices:
+
+        doc = corpus_documents[index]
+
+        if category:
+            doc_category = doc.metadata.get("category")
+
+            if doc_category != category:
+                continue
+
+        # No keyword overlap
+        if scores[index] <= 0:
+            continue
+
+        results.append(doc)
+
+        if len(results) >= k:
+            break
+
+    return results
+
+
 @app.post("/query")
 async def query(req: QueryRequest):
 
     # --------------------------------------------------------
-    # STEP 1: Retrieve candidates from Chroma
+    # STEP 1: Generate multiple search queries
     # --------------------------------------------------------
+
     queries = generate_queries(req.question)
 
     print(f"Original query: {req.question}")
-    print("Generated queries:")
 
+    print("Generated queries:")
     for query in queries:
         print(f"- {query}")
+
+    # --------------------------------------------------------
+    # STEP 2: Hybrid retrieval
+    # --------------------------------------------------------
 
     all_documents = []
 
     for query in queries:
 
+        # Vector search
         if req.category:
-            documents = db.similarity_search(
+            vector_documents = db.similarity_search(
                 query,
                 k=5,
                 filter={"category": req.category}
             )
         else:
-            documents = db.similarity_search(
+            vector_documents = db.similarity_search(
                 query,
                 k=5
             )
 
-    all_documents.extend(documents)
+        all_documents.extend(vector_documents)
+
+        # Keyword search
+        keyword_documents = keyword_search(
+            query,
+            k=5,
+            category=req.category
+        )
+
+        all_documents.extend(keyword_documents)
+
+    # --------------------------------------------------------
+    # STEP 3: Remove duplicates
+    # --------------------------------------------------------
+
+    unique_documents = {}
+
+    for doc in all_documents:
+
+        key = (
+            doc.metadata.get("document_id"),
+            doc.metadata.get("chunk_id")
+        )
+
+        unique_documents[key] = doc
+
+    documents = list(unique_documents.values())
+
+    print(f"Hybrid candidates: {len(documents)}")
 
 
     # --------------------------------------------------------
@@ -243,6 +351,7 @@ async def query(req: QueryRequest):
 
         return {
             "answer": "I don't know based on the provided information.",
+            "best_score": -999.0,
             "sources": []
         }
 

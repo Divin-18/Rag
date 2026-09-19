@@ -57,6 +57,13 @@ questions = [
         "expected_source": "finance",
         "should_know": True
     },
+    {
+    "question": "What database supports foreign keys and complex SQL queries?",
+    "category": "backend",
+    "expected_answer": "PostgreSQL",
+    "expected_source": "engineering",
+    "should_know": True
+    },
 ]
 
 total = len(questions)
