@@ -206,15 +206,17 @@ class QueryRequest(BaseModel):
 
 def generate_queries(question: str) -> list[str]:
     prompt = f"""
-Generate 3 different search queries for the user's question.
+Generate exactly 3 alternative search queries for the user's question.
 
-The queries should:
-- preserve the original meaning
-- use important technical or domain terms
-- use different wording
-- be suitable for semantic search
-- return only the 3 queries, one per line
-- do not number them
+Rules:
+- All 3 queries must have exactly the same meaning and intent as the original.
+- Rephrase the question using different wording.
+- Keep all important technical and domain terms.
+- Do not introduce a different answer or related concept.
+- Do not introduce new entities, technologies, products, databases, people, or assumptions.
+- Do not answer the question.
+- Return exactly 3 queries, one per line.
+- Do not number them.
 
 User question:
 {question}
@@ -298,7 +300,7 @@ async def query(req: QueryRequest):
     all_documents = []
 
     for query in queries:
-
+        print(f"\nSearch query: {query}")
         # Vector search
         if req.category:
             vector_documents = db.similarity_search(
@@ -311,7 +313,12 @@ async def query(req: QueryRequest):
                 query,
                 k=5
             )
-
+        print("Vector results:")
+        for doc in vector_documents:
+            print(
+                f"  - {doc.metadata.get('document_id')} | "
+                f"chunk {doc.metadata.get('chunk_id')}"
+            )
         all_documents.extend(vector_documents)
 
         # Keyword search
@@ -320,6 +327,14 @@ async def query(req: QueryRequest):
             k=5,
             category=req.category
         )
+
+        print("BM25 results:")
+
+        for doc in keyword_documents:
+            print(
+                f"  - {doc.metadata.get('document_id')} | "
+                f"chunk {doc.metadata.get('chunk_id')}"
+            )
 
         all_documents.extend(keyword_documents)
 
